@@ -30,9 +30,15 @@ jobs:
         if: steps.cache-goping.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/.local/bin
-          go install github.com/schollz/goping@latest
+          # Menambahkan GOFLAGS untuk menonaktifkan caching Git dan memaksa penggunaan HTTP
+          GOFLAGS="-modcacherw" go install github.com/schollz/goping@latest
           mv ~/go/bin/goping ~/.local/bin/goping # Pindahkan ke lokasi yang di-cache
           echo "goping downloaded and built."
+        env:
+          # Pastikan Go menggunakan mode "proxy" untuk mengunduh modul,
+          # menghindari permintaan kredensial Git.
+          GOPROXY: direct
+          GO111MODULE: on
 
       - name: Ensure goping is in PATH
         run: echo "~/.local/bin" >> $GITHUB_PATH # Tambahkan ke PATH agar bisa dipanggil langsung
@@ -73,7 +79,7 @@ jobs:
             touch reachable_proxies.txt # Pastikan file output ada, meskipun kosong
             exit 0
           fi
-          
+
           # Gunakan goping untuk menguji koneksi TCP secara paralel
           # -p 50: 50 goroutine paralel
           # -t 5s: 5 detik timeout per koneksi
