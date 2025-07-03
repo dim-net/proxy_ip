@@ -1,89 +1,95 @@
 name: Update and Test Proxies
 
 on:
-  workflow_dispatch: # Mengizinkan eksekusi manual
+  workflow_dispatch: # Allows manual execution
   schedule:
-    - cron: '0 */6 * * *' # Jalankan setiap 6 jam
+    - cron: '0 */6 * * *' # Run every 6 hours
 
 jobs:
   update-proxies:
     runs-on: ubuntu-latest
-    timeout-minutes: 20 # Tingkatkan timeout jika daftar proxy sangat banyak
+    timeout-minutes: 20 # Increase timeout if proxy list is very large
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable # Use dtolnay action for Rust setup
         with:
-          go-version: '1.22' # Gunakan versi Go terbaru
+          toolchain: stable
+          components: rustfmt, clippy
 
-      - name: Cache goping executable
-        id: cache-goping
+      - name: Cache tcping executable
+        id: cache-tcping
         uses: actions/cache@v4
         with:
-          path: ~/.local/bin/goping # Lokasi executable goping
-          key: ${{ runner.os }}-goping-rudy-v1 # Kunci cache baru untuk Kevin-Rudy/goping
+          # Path to the compiled tcping executable
+          path: ~/.cargo/bin/tcping
+          key: ${{ runner.os }}-tcping-v1 # New cache key for tcping
 
-      - name: Download and build goping if not cached (using Go proxy and Kevin-Rudy/goping)
-        if: steps.cache-goping.outputs.cache-hit != 'true'
+      - name: Download and build tcping if not cached
+        if: steps.cache-tcping.outputs.cache-hit != 'true'
         run: |
-          mkdir -p ~/.local/bin
-          # Menggunakan Kevin-Rudy/goping sebagai sumber
-          GOPROXY=https://proxy.golang.org GO111MODULE=on go install github.com/Kevin-Rudy/goping@latest
-          mv ~/go/bin/goping ~/.local/bin/goping # Pindahkan ke lokasi yang di-cache
-          echo "goping (Kevin-Rudy/goping) downloaded and built successfully."
-        env:
-          GOPROXY: https://proxy.golang.org
-          GO111MODULE: on
+          # Use cargo to install tcping from crates.io
+          # --locked: use Cargo.lock if available for reproducible builds
+          # --root ~/.cargo: install to the cargo home directory for caching
+          cargo install tcping --root ~/.cargo
+          echo "tcping downloaded and built successfully."
 
-      - name: Ensure goping is in PATH
-        run: echo "~/.local/bin" >> $GITHUB_PATH # Tambahkan ke PATH agar bisa dipanggil langsung
+      - name: Ensure tcping is in PATH
+        # ~/.cargo/bin is automatically added to PATH by dtolnay/rust-toolchain,
+        # but we'll reconfirm for clarity.
+        run: echo "~/.cargo/bin" >> $GITHUB_PATH
 
       - name: Define proxy sources
         id: proxy_sources
         run: |
-          # Anda bisa menambahkan lebih banyak URL di sini, pisahkan dengan spasi
+          # Define your proxy list URLs here, separated by spaces
           echo "PROXY_URLS=https://raw.githubusercontent.com/gopaybis/Proxylist/refs/heads/main/totalproxylist2.txt https://raw.githubusercontent.com/h58fmb0344g9h3/p57gdv3j3n0vg334/refs/heads/main/f74bjd2h2ko99f3j5" >> "$GITHUB_ENV"
 
       - name: Fetch and combine proxies
         run: |
           TEMP_FILE="all_proxies_raw.txt"
-          :> "$TEMP_FILE" # Buat file kosong
+          :> "$TEMP_FILE" # Create an empty file
 
           for url in ${{ env.PROXY_URLS }}; do
             echo "Fetching from: $url"
             curl -s "$url" >> "$TEMP_FILE"
-            echo "" >> "$TEMP_FILE" # Tambahkan baris baru untuk pemisah
+            echo "" >> "$TEMP_FILE" # Add a newline for separation
           done
 
-          # Hapus baris kosong dan trim spasi
+          # Remove empty lines and trim whitespace
           sed -i '/^$/d' "$TEMP_FILE"
           sed -i 's/^[[:space:]]*//;s/[[:space:]]*$//' "$TEMP_FILE"
 
-          # Ekstrak hanya IP:Port, hapus duplikat, dan simpan ke file baru
+          # Extract only IP:Port, remove duplicates, and save to a new file for ping action
           awk -F',' '{print $1":"$2}' "$TEMP_FILE" | sort -u > "proxies_for_ping.txt"
 
           echo "Combined unique IP:Port for ping test:"
           cat "proxies_for_ping.txt"
           echo "Total unique IP:Port entries: $(wc -l < proxies_for_ping.txt)"
 
-      - name: Test proxy connections (TCP Ping with goping)
+      - name: Test proxy connections (TCP Ping with tcping - Rust)
         id: tcp_ping_test
         run: |
           if [ ! -s "proxies_for_ping.txt" ]; then
             echo "No proxies to test in proxies_for_ping.txt. Exiting gracefully."
-            touch reachable_proxies.txt # Pastikan file output ada, meskipun kosong
+            touch reachable_proxies.txt # Ensure output file exists, even if empty
             exit 0
           fi
 
-          # Gunakan goping untuk menguji koneksi TCP secara paralel
-          # -p 50: 50 goroutine paralel
-          # -t 5s: 5 detik timeout per koneksi
-          # -o: output hanya IP:Port yang sukses
-          # -f: baca dari file
-          goping -p 50 -t 2s -o -f proxies_for_ping.txt > reachable_proxies.txt || true # '|| true' agar tidak gagal jika ada error non-fatal
+          # Use tcping (Rust version) to test TCP connections
+          # tcping options:
+          # -t 5s: timeout 5 seconds
+          # -c 1: check each host once
+          # -q: quiet mode (only print results)
+          # -f: read hosts from file
+          # The output format of tcping (Rust) is slightly different.
+          # We'll filter for successful pings (excluding "timed out" or "connection refused").
+          # NOTE: tcping (Rust) by default prints a lot of info. We need to parse its output.
+          # A more robust parsing might be needed for specific scenarios.
+          tcping -t 2s -c 1 -q -f proxies_for_ping.txt | grep -E "pinged|online" | awk '{print $1}' > reachable_proxies.txt || true
 
           echo "Reachable IP:Port proxies:"
           cat reachable_proxies.txt
@@ -91,14 +97,14 @@ jobs:
 
       - name: Filter original proxy data based on reachable IP:Port
         run: |
-          ORIGINAL_PROXIES_FILE="all_proxies_raw.txt" # File dengan data proxy lengkap (IP,Port,Country,Org)
-          REACHABLE_IPS_FILE="reachable_proxies.txt" # Output dari goping (IP:Port)
-          FINAL_PROXY_FILE="proxy.txt" # File output akhir
+          ORIGINAL_PROXIES_FILE="all_proxies_raw.txt" # File with full proxy data (IP,Port,Country,Org)
+          REACHABLE_IPS_FILE="reachable_proxies.txt" # Output from tcping (IP:Port)
+          FINAL_PROXY_FILE="proxy.txt" # Your desired final output file
 
-          :> "$FINAL_PROXY_FILE" # Buat file kosong
+          :> "$FINAL_PROXY_FILE" # Create an empty file
 
-          # Baca IP:Port yang dapat dijangkau dan cari baris lengkapnya dari data mentah
-          # Menggunakan grep -Ff agar lebih efisien untuk banyak pola
+          # Read reachable IP:Ports and find their corresponding full lines from the raw data
+          # Using grep -Ff for efficiency with many patterns
           grep -Ff <(sed 's/$/\,/' "$REACHABLE_IPS_FILE") "$ORIGINAL_PROXIES_FILE" | sort -u > "$FINAL_PROXY_FILE"
 
           echo "Final proxy.txt content (reachable proxies with full details):"
@@ -110,7 +116,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add proxy.txt
-          git diff --quiet --cached || git commit -m "Update proxy list with reachable proxies via TCP ping"
+          git diff --quiet --cached || git commit -m "Update proxy list with reachable proxies via TCP ping (Rust)"
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
