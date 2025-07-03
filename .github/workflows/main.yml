@@ -27,7 +27,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/tcping
-          key: ${{ runner.os }}-tcping-v1
+          key: ${{ runner.os }}-tcping-v2 # Ubah kunci cache!
 
       - name: Download and build tcping if not cached
         if: steps.cache-tcping.outputs.cache-hit != 'true'
@@ -70,10 +70,24 @@ jobs:
             exit 0
           fi
 
-          tcping -t 2s -c 1 -q -f proxies_for_ping.txt | grep -E "pinged|online" | awk '{print $1}' > reachable_proxies.txt || true
+          FINAL_REACHABLE_PROXIES="reachable_proxies.txt"
+          :> "$FINAL_REACHABLE_PROXIES" # Pastikan file output kosong
 
-          echo "Reachable IP:Port proxies:"
-          cat reachable_proxies.txt
+          echo "--- Running tcping for each proxy ---"
+          while IFS= read -r proxy_address; do
+            echo "Testing: $proxy_address" # Debugging individual proxy
+            # tcping -t <timeout_ms> <address>
+            # Outputnya mungkin perlu di-parse, kita akan mencari "Connection established" atau sejenisnya
+            if tcping -t 5000 "$proxy_address" > /dev/null 2>&1; then
+              echo "$proxy_address" >> "$FINAL_REACHABLE_PROXIES"
+              echo "  --> Reachable!"
+            else
+              echo "  --> Not reachable."
+            fi
+          done < "proxies_for_ping.txt"
+
+          echo "--- Content of reachable_proxies.txt (after tcping) ---"
+          cat "$FINAL_REACHABLE_PROXIES"
 
       - name: Filter original proxy data based on reachable IP:Port
         run: |
@@ -83,9 +97,12 @@ jobs:
 
           :> "$FINAL_PROXY_FILE"
 
+          echo "--- Content of reachable_proxies.txt for final filter ---"
+          cat "$REACHABLE_IPS_FILE"
+
           grep -Ff <(sed 's/$/\,/' "$REACHABLE_IPS_FILE") "$ORIGINAL_PROXIES_FILE" | sort -u > "$FINAL_PROXY_FILE"
 
-          echo "Final proxy.txt content (reachable proxies with full details):"
+          echo "--- Final proxy.txt content ---"
           cat "$FINAL_PROXY_FILE"
 
       - name: Commit and push if changes exist
