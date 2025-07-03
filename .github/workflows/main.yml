@@ -1,0 +1,144 @@
+name: Update and Test Proxies
+
+on:
+  workflow_dispatch: # Mengizinkan eksekusi manual
+  schedule:
+    - cron: '0 */6 * * *' # Jalankan setiap 6 jam
+
+jobs:
+  update-proxies:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # Gunakan versi Node.js yang stabil
+
+      - name: Define proxy sources
+        id: proxy_sources
+        run: |
+          # Anda bisa menambahkan lebih banyak URL di sini, pisahkan dengan spasi
+          # Misalnya: URL1 URL2 URL3
+          echo "PROXY_URLS=https://raw.githubusercontent.com/h58fmb0344g9h3/p57gdv3j3n0vg334/refs/heads/main/f74bjd2h2ko99f3j5 https://example.com/another-proxy-list.txt" >> "$GITHUB_ENV"
+
+      - name: Fetch and combine proxies
+        run: |
+          TEMP_FILE="all_proxies_raw.txt"
+          :> "$TEMP_FILE" # Buat file kosong
+
+          for url in ${{ env.PROXY_URLS }}; do
+            echo "Fetching from: $url"
+            curl -s "$url" >> "$TEMP_FILE"
+            echo "" >> "$TEMP_FILE" # Tambahkan baris baru untuk pemisah
+          done
+
+          echo "Raw combined proxies:"
+          cat "$TEMP_FILE"
+
+          # Hapus baris kosong dan trim spasi
+          sed -i '/^$/d' "$TEMP_FILE"
+          sed -i 's/^[[:space:]]*//;s/[[:space:]]*$//' "$TEMP_FILE"
+
+          # Hapus duplikat
+          sort -u "$TEMP_FILE" -o "combined_unique_proxies.txt"
+
+          echo "Combined unique proxies:"
+          cat "combined_unique_proxies.txt"
+
+      - name: Test proxy connections
+        id: test_proxies
+        run: |
+          VALID_PROXIES_FILE="proxy.txt"
+          :> "$VALID_PROXIES_FILE" # Buat file kosong untuk proxy yang valid
+
+          # Pastikan file yang akan diuji ada dan tidak kosong
+          if [ ! -s "combined_unique_proxies.txt" ]; then
+            echo "No proxies to test in combined_unique_proxies.txt. Exiting."
+            exit 0
+          fi
+
+          # Skrip Node.js untuk pengujian koneksi TCP
+          node -e '
+            const fs = require("fs");
+            const net = require("net");
+
+            const inputFile = "combined_unique_proxies.txt";
+            const outputFile = "proxy.txt";
+            const timeoutMs = 3000; // Timeout 3 detik per koneksi
+
+            async function testProxy(ip, port) {
+              return new Promise(resolve => {
+                const socket = new net.Socket();
+                socket.setTimeout(timeoutMs);
+
+                socket.once("connect", () => {
+                  socket.destroy();
+                  resolve(true); // Koneksi berhasil
+                });
+
+                socket.once("timeout", () => {
+                  socket.destroy();
+                  resolve(false); // Timeout
+                });
+
+                socket.once("error", (err) => {
+                  socket.destroy();
+                  resolve(false); // Error koneksi
+                });
+
+                socket.connect(port, ip);
+              });
+            }
+
+            async function main() {
+              const proxies = fs.readFileSync(inputFile, "utf8").split("\n").filter(Boolean);
+              const validProxies = [];
+
+              console.log(`Starting connection tests for ${proxies.length} proxies...`);
+
+              for (const line of proxies) {
+                const parts = line.split(",");
+                if (parts.length >= 2) {
+                  const ip = parts[0].trim();
+                  const port = parseInt(parts[1].trim(), 10);
+
+                  if (ip && !isNaN(port) && port > 0 && port < 65536) {
+                    console.log(`Testing ${ip}:${port}...`);
+                    const isValid = await testProxy(ip, port);
+                    if (isValid) {
+                      validProxies.push(line);
+                      console.log(`  ✅ ${ip}:${port} is reachable.`);
+                    } else {
+                      console.log(`  ❌ ${ip}:${port} is NOT reachable.`);
+                    }
+                  } else {
+                    console.warn(`Skipping malformed proxy entry: ${line}`);
+                  }
+                } else {
+                  console.warn(`Skipping malformed line: ${line}`);
+                }
+              }
+
+              fs.writeFileSync(outputFile, validProxies.join("\n") + "\n");
+              console.log(`Finished testing. Found ${validProxies.length} valid proxies.`);
+            }
+
+            main().catch(console.error);
+          '
+
+          echo "Valid proxies written to proxy.txt:"
+          cat "$VALID_PROXIES_FILE"
+
+      - name: Commit and push if changes exist
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add proxy.txt
+          git diff --quiet || git commit -m "Update proxy list with reachable proxies"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
