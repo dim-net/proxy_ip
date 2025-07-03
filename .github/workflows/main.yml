@@ -8,6 +8,8 @@ on:
 jobs:
   update-proxy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
     - name: Checkout repository
@@ -23,8 +25,8 @@ jobs:
       run: |
         node -e '
           const net = require("net");
-          const fs = require("fs"); // Tambahkan ini
-          const path = require("path"); // Tambahkan ini
+          const fs = require("fs"); 
+          const path = require("path"); 
 
           const PROXY_LIST_URLS = [
               "https://raw.githubusercontent.com/gopaybis/Proxylist/refs/heads/main/totalproxylist2.txt",
@@ -59,6 +61,9 @@ jobs:
           }
 
           async function main() {
+              const fetchModule = await import("node-fetch");
+              const fetch = fetchModule.default; 
+
               console.log(`Fetching proxy lists from ${PROXY_LIST_URLS.length} sources...`);
               const fetchPromises = PROXY_LIST_URLS.map(url => fetch(url).then(res => {
                   if (!res.ok) {
