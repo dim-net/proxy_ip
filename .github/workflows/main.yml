@@ -2,8 +2,8 @@ name: Update Proxy List
 
 on:
   schedule:
-    - cron: '0 * * * *' # Jalankan setiap jam. Anda bisa mengubahnya sesuai kebutuhan.
-  workflow_dispatch: # Memungkinkan menjalankan workflow secara manual
+    - cron: '0 * * * *'
+  workflow_dispatch:
 
 jobs:
   update-proxy:
@@ -16,13 +16,15 @@ jobs:
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18' # Atau versi Node.js yang Anda inginkan
+        node-version: '18'
 
     - name: Run proxy health check and save to file
       id: run-script
       run: |
         node -e '
-          import net from "net";
+          const net = require("net");
+          const fs = require("fs"); // Tambahkan ini
+          const path = require("path"); // Tambahkan ini
 
           const PROXY_LIST_URLS = [
               "https://raw.githubusercontent.com/gopaybis/Proxylist/refs/heads/main/totalproxylist2.txt",
@@ -85,9 +87,6 @@ jobs:
               
               const activeProxies = checkedProxies.filter(p => p.active);
               console.log(`Health check complete. ${activeProxies.length} active proxies found.`);
-
-              const fs = await import("fs");
-              const path = await import("path");
 
               const outputPath = path.join(process.env.GITHUB_WORKSPACE, "proxy.txt");
               const proxyContent = activeProxies.map(p => `${p.ip}:${p.port}`).join("\\n");
