@@ -24,24 +24,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local/bin/goping # Lokasi executable goping
-          key: ${{ runner.os }}-goping-v2 # Kunci cache (ubah versi cache)
+          key: ${{ runner.os }}-goping-rudy-v1 # Kunci cache baru untuk Kevin-Rudy/goping
 
-      - name: Download and build goping if not cached (new method)
+      - name: Download and build goping if not cached (using Go proxy and Kevin-Rudy/goping)
         if: steps.cache-goping.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/.local/bin
-          # Clone repository secara eksplisit, lalu build
-          # Pastikan GOPROXY dan GO111MODULE diterapkan saat cloning
-          git clone https://github.com/schollz/goping.git /tmp/goping_src
-          cd /tmp/goping_src
-          # Lakukan build dalam konteks modul Go
-          GOPROXY=direct GO111MODULE=on go build -o ~/.local/bin/goping .
-          echo "goping downloaded and built."
-        # Tambahkan env ke langkah ini jika masih ada masalah
+          # Menggunakan Kevin-Rudy/goping sebagai sumber
+          GOPROXY=https://proxy.golang.org GO111MODULE=on go install github.com/Kevin-Rudy/goping@latest
+          mv ~/go/bin/goping ~/.local/bin/goping # Pindahkan ke lokasi yang di-cache
+          echo "goping (Kevin-Rudy/goping) downloaded and built successfully."
         env:
-          GOPROXY: direct
+          GOPROXY: https://proxy.golang.org
           GO111MODULE: on
-
 
       - name: Ensure goping is in PATH
         run: echo "~/.local/bin" >> $GITHUB_PATH # Tambahkan ke PATH agar bisa dipanggil langsung
