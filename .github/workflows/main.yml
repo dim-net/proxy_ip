@@ -1,116 +1,112 @@
-name: Update and Test Proxies
+name: Update Proxy List
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 * * * *' # Jalankan setiap jam. Anda bisa mengubahnya sesuai kebutuhan.
+  workflow_dispatch: # Memungkinkan menjalankan workflow secara manual
 
 jobs:
-  update-proxies:
+  update-proxy:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18' # Atau versi Node.js yang Anda inginkan
 
-      - name: Cache tcping executable
-        id: cache-tcping
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/tcping
-          key: ${{ runner.os }}-tcping-v2 # Ubah kunci cache!
+    - name: Run proxy health check and save to file
+      id: run-script
+      run: |
+        node -e '
+          import net from "net";
 
-      - name: Download and build tcping if not cached
-        if: steps.cache-tcping.outputs.cache-hit != 'true'
-        run: |
-          cargo install tcping --root ~/.cargo
-          echo "tcping downloaded and built successfully."
+          const PROXY_LIST_URLS = [
+              "https://raw.githubusercontent.com/gopaybis/Proxylist/refs/heads/main/totalproxylist2.txt",
+              "https://raw.githubusercontent.com/h58fmb0344g9h3/p57gdv3j3n0vg334/refs/heads/main/f74bjd2h2ko99f3j5"
+          ];
+          const HEALTH_CHECK_TIMEOUT = 5000;
 
-      - name: Ensure tcping is in PATH
-        run: echo "~/.cargo/bin" >> $GITHUB_PATH
+          async function checkProxyHealth(proxy) {
+              const { ip, port } = proxy;
+              return new Promise((resolve) => {
+                  const startTime = Date.now();
+                  let socket;
 
-      - name: Define proxy sources
-        id: proxy_sources
-        run: |
-          echo "PROXY_URLS=https://raw.githubusercontent.com/gopaybis/Proxylist/refs/heads/main/totalproxylist2.txt https://raw.githubusercontent.com/h58fmb0344g9h3/p57gdv3j3n0vg334/refs/heads/main/f74bjd2h2ko99f3j5" >> "$GITHUB_ENV"
+                  socket = net.connect({ host: ip, port: parseInt(port) }, () => {
+                      const latency = Date.now() - startTime;
+                      socket.destroy();
+                      resolve({ ...proxy, active: true, latency: latency });
+                  });
 
-      - name: Fetch and combine proxies
-        run: |
-          TEMP_FILE="all_proxies_raw.txt"
-          :> "$TEMP_FILE"
+                  socket.setTimeout(HEALTH_CHECK_TIMEOUT);
+                  
+                  socket.on("timeout", () => {
+                      socket.destroy();
+                      resolve({ ...proxy, active: false, latency: -1, error: "Timeout" });
+                  });
 
-          for url in ${{ env.PROXY_URLS }}; do
-            curl -s "$url" >> "$TEMP_FILE"
-            echo "" >> "$TEMP_FILE"
-          done
+                  socket.on("error", (err) => {
+                      socket.destroy();
+                      resolve({ ...proxy, active: false, latency: -1, error: err.message });
+                  });
+              });
+          }
 
-          sed -i '/^$/d' "$TEMP_FILE"
-          sed -i 's/^[[:space:]]*//;s/[[:space:]]*$//' "$TEMP_FILE"
+          async function main() {
+              console.log(`Fetching proxy lists from ${PROXY_LIST_URLS.length} sources...`);
+              const fetchPromises = PROXY_LIST_URLS.map(url => fetch(url).then(res => {
+                  if (!res.ok) {
+                      throw new Error(`Failed to fetch from ${url}: ${res.status} ${res.statusText}`);
+                  }
+                  return res.text();
+              }));
+              
+              const proxyStrings = await Promise.all(fetchPromises);
+              console.log("All proxy lists fetched successfully.");
 
-          awk -F',' '{print $1":"$2}' "$TEMP_FILE" | sort -u > "proxies_for_ping.txt"
+              const combinedString = proxyStrings.join("\\n");
+              const allLines = combinedString.split("\\n").filter(Boolean);
+              const uniqueLines = [...new Set(allLines)];
 
-          echo "Combined unique IP:Port for ping test:"
-          cat "proxies_for_ping.txt"
+              console.log(`Found ${allLines.length} total proxies, with ${uniqueLines.length} unique proxies after de-duplication.`);
 
-      - name: Test proxy connections (TCP Ping with tcping - Rust)
-        id: tcp_ping_test
-        run: |
-          if [ ! -s "proxies_for_ping.txt" ]; then
-            echo "No proxies to test in proxies_for_ping.txt. Exiting gracefully."
-            touch reachable_proxies.txt
-            exit 0
-          fi
+              const rawProxies = uniqueLines.map((entry) => {
+                      const [ip, port, country, org] = entry.split(",");
+                      return { ip: ip || "Unknown", port: port || "Unknown", country: country ? country.toUpperCase() : "Unknown", org: org || "Unknown Org" };
+                  });
 
-          FINAL_REACHABLE_PROXIES="reachable_proxies.txt"
-          :> "$FINAL_REACHABLE_PROXIES" # Pastikan file output kosong
+              console.log(`Starting health check for ${rawProxies.length} unique proxies...`);
+              const healthCheckPromises = rawProxies.map(proxy => checkProxyHealth(proxy));
+              const checkedProxies = await Promise.all(healthCheckPromises);
+              
+              const activeProxies = checkedProxies.filter(p => p.active);
+              console.log(`Health check complete. ${activeProxies.length} active proxies found.`);
 
-          echo "--- Running tcping for each proxy ---"
-          while IFS= read -r proxy_address; do
-            echo "Testing: $proxy_address" # Debugging individual proxy
-            # tcping -t <timeout_ms> <address>
-            # Outputnya mungkin perlu di-parse, kita akan mencari "Connection established" atau sejenisnya
-            if tcping -t 5000 "$proxy_address" > /dev/null 2>&1; then
-              echo "$proxy_address" >> "$FINAL_REACHABLE_PROXIES"
-              echo "  --> Reachable!"
-            else
-              echo "  --> Not reachable."
-            fi
-          done < "proxies_for_ping.txt"
+              const fs = await import("fs");
+              const path = await import("path");
 
-          echo "--- Content of reachable_proxies.txt (after tcping) ---"
-          cat "$FINAL_REACHABLE_PROXIES"
+              const outputPath = path.join(process.env.GITHUB_WORKSPACE, "proxy.txt");
+              const proxyContent = activeProxies.map(p => `${p.ip}:${p.port}`).join("\\n");
+              fs.writeFileSync(outputPath, proxyContent);
+              console.log(`Successfully wrote ${activeProxies.length} active proxies to proxy.txt`);
+          }
 
-      - name: Filter original proxy data based on reachable IP:Port
-        run: |
-          ORIGINAL_PROXIES_FILE="all_proxies_raw.txt"
-          REACHABLE_IPS_FILE="reachable_proxies.txt"
-          FINAL_PROXY_FILE="proxy.txt"
+          main().catch(error => {
+              console.error("Error during proxy update process:", error);
+              process.exit(1);
+          });
+        '
+      env:
+        GITHUB_WORKSPACE: ${{ github.workspace }}
 
-          :> "$FINAL_PROXY_FILE"
-
-          echo "--- Content of reachable_proxies.txt for final filter ---"
-          cat "$REACHABLE_IPS_FILE"
-
-          grep -Ff <(sed 's/$/\,/' "$REACHABLE_IPS_FILE") "$ORIGINAL_PROXIES_FILE" | sort -u > "$FINAL_PROXY_FILE"
-
-          echo "--- Final proxy.txt content ---"
-          cat "$FINAL_PROXY_FILE"
-
-      - name: Commit and push if changes exist
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add proxy.txt
-          git diff --quiet --cached || git commit -m "Update proxy list with reachable proxies via TCP ping (Rust)"
-          git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Commit and push if changes
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add proxy.txt
+        git commit -m "Update active proxy list" || echo "No changes to commit"
+        git push
