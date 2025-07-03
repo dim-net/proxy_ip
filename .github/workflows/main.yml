@@ -1,144 +1,92 @@
 name: Update and Test Proxies
 
 on:
-  workflow_dispatch: # Mengizinkan eksekusi manual
+  workflow_dispatch: # Allows manual execution
   schedule:
-    - cron: '0 */6 * * *' # Jalankan setiap 6 jam
+    - cron: '0 */6 * * *' # Run every 6 hours
 
 jobs:
   update-proxies:
     runs-on: ubuntu-latest
+    timeout-minutes: 15 # Set a timeout for the entire job to prevent infinite runs
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20' # Gunakan versi Node.js yang stabil
-
       - name: Define proxy sources
         id: proxy_sources
         run: |
-          # Anda bisa menambahkan lebih banyak URL di sini, pisahkan dengan spasi
-          # Misalnya: URL1 URL2 URL3
-          echo "PROXY_URLS=https://raw.githubusercontent.com/h58fmb0344g9h3/p57gdv3j3n0vg334/refs/heads/main/f74bjd2h2ko99f3j5 https://example.com/another-proxy-list.txt" >> "$GITHUB_ENV"
+          # Define your proxy list URLs here, separated by spaces
+          # Example: URL1 URL2 URL3
+          echo "PROXY_URLS=https://raw.githubusercontent.com/gopaybis/Proxylist/refs/heads/main/totalproxylist2.txt https://raw.githubusercontent.com/h58fmb0344g9h3/p57gdv3j3n0vg334/refs/heads/main/f74bjd2h2ko99f3j5" >> "$GITHUB_ENV"
 
       - name: Fetch and combine proxies
         run: |
           TEMP_FILE="all_proxies_raw.txt"
-          :> "$TEMP_FILE" # Buat file kosong
+          :> "$TEMP_FILE" # Create an empty file
 
           for url in ${{ env.PROXY_URLS }}; do
             echo "Fetching from: $url"
             curl -s "$url" >> "$TEMP_FILE"
-            echo "" >> "$TEMP_FILE" # Tambahkan baris baru untuk pemisah
+            echo "" >> "$TEMP_FILE" # Add a newline for separation
           done
 
-          echo "Raw combined proxies:"
-          cat "$TEMP_FILE"
-
-          # Hapus baris kosong dan trim spasi
+          # Remove empty lines and trim whitespace
           sed -i '/^$/d' "$TEMP_FILE"
           sed -i 's/^[[:space:]]*//;s/[[:space:]]*$//' "$TEMP_FILE"
 
-          # Hapus duplikat
-          sort -u "$TEMP_FILE" -o "combined_unique_proxies.txt"
+          # Extract only IP:Port, remove duplicates, and save to a new file for ping action
+          # We'll use awk to reformat the lines to "ip:port" as required by the ping action
+          # and then sort -u to get unique ip:port combinations
+          awk -F',' '{print $1":"$2}' "$TEMP_FILE" | sort -u > "proxies_for_ping.txt"
 
-          echo "Combined unique proxies:"
-          cat "combined_unique_proxies.txt"
+          echo "Combined unique IP:Port for ping test:"
+          cat "proxies_for_ping.txt"
+          echo "Total unique IP:Port entries: $(wc -l < proxies_for_ping.txt)"
 
-      - name: Test proxy connections
-        id: test_proxies
+      - name: Test proxy connections (TCP Ping)
+        id: tcp_ping_test
+        uses: superfly/fly-proxy-ping@v0.1.0
+        with:
+          file: proxies_for_ping.txt # Input file with IP:Port list
+          timeout: 2s                 # 5-second timeout for each connection
+          concurrency: 50             # Number of concurrent connections to test at once (adjust as needed)
+          output: reachable_proxies.txt # Output file for reachable proxies
+
+      - name: Filter original proxy data based on reachable IP:Port
         run: |
-          VALID_PROXIES_FILE="proxy.txt"
-          :> "$VALID_PROXIES_FILE" # Buat file kosong untuk proxy yang valid
+          ORIGINAL_PROXIES_FILE="all_proxies_raw.txt" # The file with full proxy data (IP,Port,Country,Org)
+          REACHABLE_IPS_FILE="reachable_proxies.txt" # The output from the TCP ping action (IP:Port)
+          FINAL_PROXY_FILE="proxy.txt" # Your desired final output file
 
-          # Pastikan file yang akan diuji ada dan tidak kosong
-          if [ ! -s "combined_unique_proxies.txt" ]; then
-            echo "No proxies to test in combined_unique_proxies.txt. Exiting."
-            exit 0
-          fi
+          :> "$FINAL_PROXY_FILE" # Create an empty file
 
-          # Skrip Node.js untuk pengujian koneksi TCP
-          node -e '
-            const fs = require("fs");
-            const net = require("net");
+          # Create a temporary file with only the IP:Port from the original combined data
+          awk -F',' '{print $1":"$2}' "$ORIGINAL_PROXIES_FILE" | sort -u > "original_ips_ports.txt"
 
-            const inputFile = "combined_unique_proxies.txt";
-            const outputFile = "proxy.txt";
-            const timeoutMs = 3000; // Timeout 3 detik per koneksi
+          # Read reachable IP:Ports and store them in a temporary lookup file (using `grep -F -x -f` is efficient)
+          # Or a more robust way to match:
+          while IFS= read -r line; do
+            # Find the original full line for each reachable IP:Port
+            # This assumes that the 'reachable_proxies.txt' contains exact 'IP:Port' strings.
+            grep "^$(echo "$line" | sed 's/\./\\./g;s/:/\\:/g')\," "$ORIGINAL_PROXIES_FILE" >> "$FINAL_PROXY_FILE"
+          done < "$REACHABLE_IPS_FILE"
 
-            async function testProxy(ip, port) {
-              return new Promise(resolve => {
-                const socket = new net.Socket();
-                socket.setTimeout(timeoutMs);
+          # Remove any potential duplicates if grep found multiple lines for the same IP:Port
+          sort -u "$FINAL_PROXY_FILE" -o "$FINAL_PROXY_FILE"
 
-                socket.once("connect", () => {
-                  socket.destroy();
-                  resolve(true); // Koneksi berhasil
-                });
 
-                socket.once("timeout", () => {
-                  socket.destroy();
-                  resolve(false); // Timeout
-                });
-
-                socket.once("error", (err) => {
-                  socket.destroy();
-                  resolve(false); // Error koneksi
-                });
-
-                socket.connect(port, ip);
-              });
-            }
-
-            async function main() {
-              const proxies = fs.readFileSync(inputFile, "utf8").split("\n").filter(Boolean);
-              const validProxies = [];
-
-              console.log(`Starting connection tests for ${proxies.length} proxies...`);
-
-              for (const line of proxies) {
-                const parts = line.split(",");
-                if (parts.length >= 2) {
-                  const ip = parts[0].trim();
-                  const port = parseInt(parts[1].trim(), 10);
-
-                  if (ip && !isNaN(port) && port > 0 && port < 65536) {
-                    console.log(`Testing ${ip}:${port}...`);
-                    const isValid = await testProxy(ip, port);
-                    if (isValid) {
-                      validProxies.push(line);
-                      console.log(`  ✅ ${ip}:${port} is reachable.`);
-                    } else {
-                      console.log(`  ❌ ${ip}:${port} is NOT reachable.`);
-                    }
-                  } else {
-                    console.warn(`Skipping malformed proxy entry: ${line}`);
-                  }
-                } else {
-                  console.warn(`Skipping malformed line: ${line}`);
-                }
-              }
-
-              fs.writeFileSync(outputFile, validProxies.join("\n") + "\n");
-              console.log(`Finished testing. Found ${validProxies.length} valid proxies.`);
-            }
-
-            main().catch(console.error);
-          '
-
-          echo "Valid proxies written to proxy.txt:"
-          cat "$VALID_PROXIES_FILE"
+          echo "Final proxy.txt content (reachable proxies with full details):"
+          cat "$FINAL_PROXY_FILE"
+          echo "Total reachable proxies: $(wc -l < "$FINAL_PROXY_FILE")"
 
       - name: Commit and push if changes exist
         run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add proxy.txt
-          git diff --quiet || git commit -m "Update proxy list with reachable proxies"
+          git diff --quiet --cached || git commit -m "Update proxy list with reachable proxies via TCP ping"
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
