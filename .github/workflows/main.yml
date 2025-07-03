@@ -20,6 +20,9 @@ jobs:
       with:
         node-version: '18'
 
+    - name: Install Node.js dependencies
+      run: npm install node-fetch # Baris ini ditambahkan untuk menginstal node-fetch
+
     - name: Run proxy health check and save to file
       id: run-script
       run: |
