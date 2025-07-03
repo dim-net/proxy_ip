@@ -24,21 +24,24 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local/bin/goping # Lokasi executable goping
-          key: ${{ runner.os }}-goping-v1 # Kunci cache
+          key: ${{ runner.os }}-goping-v2 # Kunci cache (ubah versi cache)
 
-      - name: Download and build goping if not cached
+      - name: Download and build goping if not cached (new method)
         if: steps.cache-goping.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/.local/bin
-          # Menambahkan GOFLAGS untuk menonaktifkan caching Git dan memaksa penggunaan HTTP
-          GOFLAGS="-modcacherw" go install github.com/schollz/goping@latest
-          mv ~/go/bin/goping ~/.local/bin/goping # Pindahkan ke lokasi yang di-cache
+          # Clone repository secara eksplisit, lalu build
+          # Pastikan GOPROXY dan GO111MODULE diterapkan saat cloning
+          git clone https://github.com/schollz/goping.git /tmp/goping_src
+          cd /tmp/goping_src
+          # Lakukan build dalam konteks modul Go
+          GOPROXY=direct GO111MODULE=on go build -o ~/.local/bin/goping .
           echo "goping downloaded and built."
+        # Tambahkan env ke langkah ini jika masih ada masalah
         env:
-          # Pastikan Go menggunakan mode "proxy" untuk mengunduh modul,
-          # menghindari permintaan kredensial Git.
           GOPROXY: direct
           GO111MODULE: on
+
 
       - name: Ensure goping is in PATH
         run: echo "~/.local/bin" >> $GITHUB_PATH # Tambahkan ke PATH agar bisa dipanggil langsung
